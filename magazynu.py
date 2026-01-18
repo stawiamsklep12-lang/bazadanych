@@ -1,64 +1,87 @@
 import streamlit as st
 from supabase import create_client, Client
 
-# Konfiguracja połączenia z Supabase
-# Dane te znajdziesz w Settings -> API w panelu Supabase
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(url, key)
+# 1. Połączenie z bazą danych
+# Upewnij się, że w Streamlit Cloud w sekcji Secrets masz dodane:
+# SUPABASE_URL = "..."
+# SUPABASE_KEY = "..."
 
-st.title("📦 Zarządzanie Produktami")
+try:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(url, key)
+except Exception as e:
+    st.error("Błąd konfiguracji kluczy API. Sprawdź plik .streamlit/secrets.toml")
+    st.stop()
 
-# --- SEKCJA 1: DODAWANIE PRODUKTU ---
-st.header("Dodaj nowy produkt")
+st.set_page_config(page_title="Magazyn Produktów", layout="centered")
+st.title("📦 System Zarządzania Produktami")
 
-# Pobieranie kategorii do listy rozwijanej
-def get_categories():
-    response = supabase.table("Kategorie").select("id, Nazwa").execute()
-    return response.data
+# --- FUNKCJE POMOCNICZE ---
 
-categories = get_categories()
-cat_options = {cat['Nazwa']: cat['id'] for cat in categories}
+def fetch_categories():
+    res = supabase.table("Kategorie").select("id, Nazwa").execute()
+    return res.data
 
-with st.form("add_product_form"):
-    nazwa = st.text_input("Nazwa produktu")
-    liczba = st.number_input("Liczba (sztuki)", min_value=0, step=1)
-    cena = st.number_input("Cena", min_value=0.0, format="%.2f")
-    kategoria_nazwa = st.selectbox("Kategoria", options=list(cat_options.keys()))
-    
-    submit_button = st.form_submit_button("Dodaj produkt")
+def fetch_products():
+    # Pobieramy produkty wraz z nazwą kategorii (join)
+    res = supabase.table("Produkty").select("id, Nazwa, Liczba, Cena, Kategoria_id").execute()
+    return res.data
 
-if submit_button:
-    new_product = {
-        "Nazwa": nazwa,
-        "Liczba": liczba,
-        "Ce...": cena, # Nazwa kolumny ucięta na obrazku, dostosuj jeśli trzeba
-        "Kategoria_id": cat_options[kategoria_nazwa]
-    }
-    
-    try:
-        supabase.table("Produkty").insert(new_product).execute()
-        st.success(f"Produkt '{nazwa}' został dodany!")
-    except Exception as e:
-        st.error(f"Błąd podczas dodawania: {e}")
+# --- UI: DODAWANIE PRODUKTU ---
+st.header("➕ Dodaj nowy produkt")
 
----
-
-# --- SEKCJA 2: USUWANIE PRODUKTU ---
-st.header("Usuń produkt")
-
-def get_products():
-    response = supabase.table("Produkty").select("id, Nazwa").execute()
-    return response.data
-
-products = get_products()
-if products:
-    prod_options = {prod['Nazwa']: prod['id'] for prod in products}
-    selected_prod = st.selectbox("Wybierz produkt do usunięcia", options=list(prod_options.keys()))
-    
-    if st.button("Usuń wybrany produkt", type="primary"):
-        supabase.table("Produkty").delete().eq("id", prod_options[selected_prod]).execute()
-        st.warning(f"Produkt '{selected_prod}' został usunięty.")
-        st.rerun()
+categories = fetch_categories()
+if not categories:
+    st.warning("Najpierw dodaj kategorie w bazie danych!")
 else:
-    st.info("Brak produktów w bazie.")
+    cat_mapping = {cat['Nazwa']: cat['id'] for cat in categories}
+    
+    with st.form("form_dodawania", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            nazwa = st.text_input("Nazwa produktu")
+            liczba = st.number_input("Ilość (Liczba)", min_value=0, step=1)
+        with col2:
+            # UWAGA: Sprawdź czy w bazie masz "Cena" czy "Ce..." 
+            cena = st.number_input("Cena (numeric)", min_value=0.0, format="%.2f")
+            kategoria_nazwa = st.selectbox("Wybierz kategorię", options=list(cat_mapping.keys()))
+        
+        submit = st.form_submit_button("Zapisz w bazie")
+
+        if submit:
+            if nazwa:
+                data_to_insert = {
+                    "Nazwa": nazwa,
+                    "Liczba": liczba,
+                    "Cena": cena, # Jeśli na obrazku ucięło nazwę, zmień tutaj na poprawną
+                    "Kategoria_id": cat_mapping[kategoria_nazwa]
+                }
+                response = supabase.table("Produkty").insert(data_to_insert).execute()
+                if response.data:
+                    st.success(f"Dodano produkt: {nazwa}")
+                    st.rerun()
+                else:
+                    st.error("Wystąpił błąd podczas zapisywania.")
+            else:
+                st.warning("Nazwa produktu nie może być pusta.")
+
+st.divider()
+
+# --- UI: LISTA I USUWANIE ---
+st.header("📋 Lista produktów i usuwanie")
+
+products = fetch_products()
+
+if products:
+    for p in products:
+        with st.expander(f"{p['Nazwa']} (ID: {p['id']})"):
+            st.write(f"Ilość: {p['Liczba']} | Cena: {p['Cena']} zł")
+            
+            # Przycisk usuwania z unikalnym kluczem
+            if st.button(f"Usuń {p['Nazwa']}", key=f"del_{p['id']}", type="primary"):
+                supabase.table("Produkty").delete().eq("id", p['id']).execute()
+                st.toast(f"Usunięto {p['Nazwa']}")
+                st.rerun()
+else:
+    st.info("Brak produktów do wyświetlenia.")
