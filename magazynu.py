@@ -22,63 +22,80 @@ def get_products():
     res = supabase.table("Produkty").select("id, Nazwa, Liczba, Cena, Kategoria_id").execute()
     return res.data
 
-# --- UI: DODAWANIE ---
-st.title("📦 Zarządzanie Magazynem")
+st.title("📦 System Zarządzania Magazynem")
 
+# --- UI: DODAWANIE PRODUKTU ---
 with st.expander("➕ Dodaj nowy produkt"):
     categories = get_categories()
-    cat_mapping = {cat['Nazwa']: cat['id'] for cat in categories}
-    
-    with st.form("add_form"):
-        col1, col2, col3 = st.columns(3)
-        nazwa = col1.text_input("Nazwa")
-        liczba = col2.number_input("Ilość", min_value=0, step=1)
-        cena = col3.number_input("Cena", min_value=0.0)
-        kat = st.selectbox("Kategoria", options=list(cat_mapping.keys()))
+    if categories:
+        cat_mapping = {cat['Nazwa']: cat['id'] for cat in categories}
         
-        if st.form_submit_button("Zatwierdź"):
-            supabase.table("Produkty").insert({
-                "Nazwa": nazwa,
-                "Liczba": liczba,
-                "Cena": cena,
-                "Kategoria_id": cat_mapping[kat]
-            }).execute()
-            st.success("Produkt dodany!")
-            st.rerun()
+        with st.form("add_form", clear_on_submit=True):
+            col1, col2, col3 = st.columns(3)
+            nazwa = col1.text_input("Nazwa produktu")
+            liczba = col2.number_input("Ilość (szt.)", min_value=0, step=1)
+            # Ustawienie formatu w input na 2 miejsca po przecinku
+            cena = col3.number_input("Cena (zł)", min_value=0.0, format="%.2f")
+            kat = st.selectbox("Kategoria", options=list(cat_mapping.keys()))
+            
+            if st.form_submit_button("Zatwierdź i dodaj"):
+                if nazwa:
+                    supabase.table("Produkty").insert({
+                        "Nazwa": nazwa,
+                        "Liczba": liczba,
+                        "Cena": round(float(cena), 2), # Zaokrąglanie przed wysyłką
+                        "Kategoria_id": cat_mapping[kat]
+                    }).execute()
+                    st.success(f"Produkt {nazwa} dodany!")
+                    st.rerun()
+                else:
+                    st.warning("Podaj nazwę produktu.")
+    else:
+        st.error("Brak kategorii w bazie. Dodaj je najpierw w panelu Supabase.")
 
 st.divider()
 
-# --- UI: LISTA Z OSTRZEŻENIEM O NISKIM STANIE ---
-st.header("📋 Aktualny stan magazynowy")
-st.info("Produkty podświetlone na **czerwono** mają stan poniżej 10 sztuk.")
-
+# --- POBIERANIE DANYCH DO TABELI I WYKRESU ---
 products = get_products()
 
 if products:
     df = pd.DataFrame(products)
     
-    # Reorganizacja kolumn dla czytelności
-    df = df[['id', 'Nazwa', 'Liczba', 'Cena']]
+    # --- SEKCJA: WYKRESY ---
+    st.header("📊 Wizualizacja stanów")
+    # Tworzymy wykres: oś X to Nazwa, oś Y to Liczba
+    chart_data = df[['Nazwa', 'Liczba']].set_index('Nazwa')
+    st.bar_chart(chart_data)
 
-    # Funkcja do kolorowania wierszy
+    st.divider()
+
+    # --- SEKCJA: TABELA Z OSTRZEŻENIAMI ---
+    st.header("📋 Lista produktów")
+    st.info("Produkty na czerwono: stan poniżej 10 sztuk.")
+
+    # Formatowanie wyświetlania ceny w dataframe
+    df_display = df[['id', 'Nazwa', 'Liczba', 'Cena']].copy()
+
+    # Funkcja do kolorowania niskiego stanu
     def highlight_low_stock(row):
-        color = 'background-color: rgba(255, 0, 0, 0.3)' if row['Liczba'] < 10 else ''
+        color = 'background-color: rgba(255, 75, 75, 0.4)' if row['Liczba'] < 10 else ''
         return [color] * len(row)
 
-    # Wyświetlanie sformatowanej tabeli
+    # Wyświetlanie tabeli ze stylami i formatowaniem ceny
     st.dataframe(
-        df.style.apply(highlight_low_stock, axis=1),
+        df_display.style.apply(highlight_low_stock, axis=1)
+                        .format({"Cena": "{:.2f} zł"}), # Zaokrąglanie widoku do 2 miejsc
         use_container_width=True,
         hide_index=True
     )
 
     # --- USUWANIE ---
-    st.subheader("🗑️ Usuwanie produktów")
-    prod_to_del = st.selectbox("Wybierz produkt do usunięcia", options=df['Nazwa'].tolist())
-    if st.button("Usuń produkt", type="primary"):
-        target_id = df[df['Nazwa'] == prod_to_del]['id'].values[0]
-        supabase.table("Produkty").delete().eq("id", target_id).execute()
-        st.warning(f"Usunięto: {prod_to_del}")
-        st.rerun()
+    with st.sidebar:
+        st.header("Usuwanie")
+        prod_to_del = st.selectbox("Produkt do usunięcia", options=df['Nazwa'].tolist())
+        if st.button("Usuń trwale", type="primary"):
+            target_id = df[df['Nazwa'] == prod_to_del]['id'].values[0]
+            supabase.table("Produkty").delete().eq("id", target_id).execute()
+            st.rerun()
 else:
-    st.write("Magazyn jest pusty.")
+    st.info("Brak produktów w bazie danych.")
