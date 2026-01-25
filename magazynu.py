@@ -4,7 +4,7 @@ from supabase import create_client, Client
 from postgrest.exceptions import APIError
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v2", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Magazyn Pro v3", layout="wide", page_icon="📦")
 
 # --- POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
@@ -27,19 +27,25 @@ def get_categories():
 
 @st.cache_data(ttl=600)
 def get_products():
-    # Pobieramy dane wraz z nazwą kategorii (join)
     res = supabase.table("Produkty").select("id, Nazwa, Liczba, Cena, Kategoria_id").execute()
     return res.data
+
+# --- FUNKCJE OPERACYJNE ---
+def update_stock(product_id, current_stock, change):
+    new_stock = max(0, current_stock + change)
+    supabase.table("Produkty").update({"Liczba": new_stock}).eq("id", product_id).execute()
+    st.cache_data.clear()
+    st.rerun()
 
 # --- GŁÓWNA LOGIKA ---
 st.title("📦 System Zarządzania Magazynem")
 
-# Zakładki dla lepszej organizacji
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 Stan Magazynowy", "⚙️ Operacje"])
-
-# Pobranie danych na początku
+# Pobranie danych
 products = get_products()
 categories = get_categories()
+
+# Zakładki
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📋 Stan Magazynowy", "➕ Dodaj/Usuń", "📥 Raporty"])
 
 if products:
     df = pd.DataFrame(products)
@@ -47,8 +53,6 @@ if products:
     # --- TAB 1: DASHBOARD ---
     with tab1:
         st.header("Podsumowanie")
-        
-        # Obliczenia KPI
         total_value = (df['Liczba'] * df['Cena']).sum()
         total_items = df['Liczba'].sum()
         low_stock_count = len(df[df['Liczba'] < 10])
@@ -63,38 +67,40 @@ if products:
         chart_data = df[['Nazwa', 'Liczba']].sort_values(by='Liczba', ascending=False)
         st.bar_chart(chart_data, x='Nazwa', y='Liczba', color="#0072B2")
 
-    # --- TAB 2: STAN MAGAZYNOWY ---
+    # --- TAB 2: STAN MAGAZYNOWY (Z EDYCJĄ) ---
     with tab2:
-        st.header("Lista produktów")
+        st.header("Zarządzanie ilością")
         
         # Wyszukiwarka
-        search = st.text_input("🔍 Szukaj produktu po nazwie...")
-        if search:
-            df_view = df[df['Nazwa'].str.contains(search, case=False)]
-        else:
-            df_view = df
+        search = st.text_input("🔍 Szukaj produktu...")
+        df_display = df[df['Nazwa'].str.contains(search, case=False)] if search else df
 
-        # Funkcja kolorowania
-        def highlight_low_stock(s):
-            return ['background-color: rgba(255, 75, 75, 0.2)' if s.Liczba < 10 else '' for _ in s]
+        # Wyświetlanie produktów z przyciskami edycji w kolumnach
+        for _, row in df_display.iterrows():
+            with st.container():
+                c1, c2, c3, c4 = st.columns([3, 2, 2, 3])
+                c1.write(f"**{row['Nazwa']}**")
+                
+                # Kolorowanie stanu
+                stock_color = ":red[" if row['Liczba'] < 10 else ":green["
+                c2.write(f"Stan: {stock_color}{row['Liczba']} szt.]")
+                
+                c3.write(f"Cena: {row['Cena']:.2f} zł")
+                
+                # Przyciski szybkiej zmiany
+                btn_col1, btn_col2 = c4.columns(2)
+                if btn_col1.button("➕", key=f"add_{row['id']}"):
+                    update_stock(row['id'], row['Liczba'], 1)
+                if btn_col2.button("➖", key=f"sub_{row['id']}"):
+                    update_stock(row['id'], row['Liczba'], -1)
+                st.divider()
 
-        st.dataframe(
-            df_view[['id', 'Nazwa', 'Liczba', 'Cena']].style.apply(highlight_low_stock, axis=1),
-            column_config={
-                "Cena": st.column_config.NumberColumn("Cena", format="%.2f zł"),
-                "Liczba": st.column_config.NumberColumn("Stan"),
-                "id": None
-            },
-            use_container_width=True,
-            hide_index=True
-        )
-
-    # --- TAB 3: OPERACJE (DODAWANIE I USUWANIE) ---
+    # --- TAB 3: DODAWANIE I USUWANIE ---
     with tab3:
         col_add, col_del = st.columns(2)
         
         with col_add:
-            st.subheader("➕ Dodaj produkt")
+            st.subheader("Dodaj nowy produkt")
             if categories:
                 cat_mapping = {cat['Nazwa']: cat['id'] for cat in categories}
                 with st.form("add_form", clear_on_submit=True):
@@ -104,7 +110,7 @@ if products:
                     cena = c2.number_input("Cena (zł)", min_value=0.0, format="%.2f")
                     kat = st.selectbox("Kategoria", options=list(cat_mapping.keys()))
                     
-                    if st.form_submit_button("Zapisz w bazie"):
+                    if st.form_submit_button("Dodaj do bazy"):
                         if nazwa:
                             try:
                                 supabase.table("Produkty").insert({
@@ -112,28 +118,34 @@ if products:
                                     "Cena": round(float(cena), 2),
                                     "Kategoria_id": cat_mapping[kat]
                                 }).execute()
-                                st.success("Dodano!")
                                 st.cache_data.clear()
+                                st.success("Dodano produkt!")
                                 st.rerun()
                             except APIError as e:
                                 st.error(f"Błąd: {e}")
-                        else:
-                            st.warning("Podaj nazwę.")
             else:
                 st.error("Brak kategorii.")
 
         with col_del:
-            st.subheader("🗑️ Usuń produkt")
+            st.subheader("Usuń produkt")
             prod_to_del = st.selectbox("Wybierz do usunięcia", options=df['Nazwa'].tolist())
-            if st.button("Usuń bezpowrotnie", type="primary"):
+            if st.button("Usuń trwale", type="primary"):
                 target_id = df[df['Nazwa'] == prod_to_del]['id'].values[0]
                 supabase.table("Produkty").delete().eq("id", target_id).execute()
                 st.cache_data.clear()
                 st.rerun()
 
+    # --- TAB 4: RAPORTY ---
+    with tab4:
+        st.header("Eksport danych")
+        st.write("Pobierz aktualny stan magazynowy w formacie CSV, który otworzysz w Excelu.")
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Pobierz raport CSV",
+            data=csv,
+            file_name='stan_magazynu.csv',
+            mime='text/csv',
+        )
 else:
-    st.info("Baza jest pusta. Dodaj pierwszy produkt w zakładce 'Operacje'.")
-    with tab3:
-        # Pozwalamy dodać produkt nawet gdy baza jest pusta
-        st.subheader("➕ Dodaj pierwszy produkt")
-        # (Tutaj musiałby być powtórzony kod formularza lub funkcja)
+    st.info("Baza jest pusta. Dodaj pierwszy produkt w zakładce 'Dodaj/Usuń'.")
