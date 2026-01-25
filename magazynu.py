@@ -4,7 +4,7 @@ from supabase import create_client, Client
 from postgrest.exceptions import APIError
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v3", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Magazyn Pro v4", layout="wide", page_icon="📦")
 
 # --- POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
@@ -33,9 +33,12 @@ def get_products():
 # --- FUNKCJE OPERACYJNE ---
 def update_stock(product_id, current_stock, change):
     new_stock = max(0, current_stock + change)
-    supabase.table("Produkty").update({"Liczba": new_stock}).eq("id", product_id).execute()
-    st.cache_data.clear()
-    st.rerun()
+    try:
+        supabase.table("Produkty").update({"Liczba": new_stock}).eq("id", product_id).execute()
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"Błąd podczas aktualizacji: {e}")
 
 # --- GŁÓWNA LOGIKA ---
 st.title("📦 System Zarządzania Magazynem")
@@ -67,46 +70,67 @@ if products:
         chart_data = df[['Nazwa', 'Liczba']].sort_values(by='Liczba', ascending=False)
         st.bar_chart(chart_data, x='Nazwa', y='Liczba', color="#0072B2")
 
-    # --- TAB 2: STAN MAGAZYNOWY (Z EDYCJĄ) ---
+    # --- TAB 2: STAN MAGAZYNOWY (Z SZYBKĄ EDYCJĄ ILOŚCI) ---
     with tab2:
-        st.header("Zarządzanie ilością")
+        st.header("Szybka zmiana stanów")
         
         # Wyszukiwarka
-        search = st.text_input("🔍 Szukaj produktu...")
+        search = st.text_input("🔍 Szukaj produktu...", key="search_input")
         df_display = df[df['Nazwa'].str.contains(search, case=False)] if search else df
 
-        # Wyświetlanie produktów z przyciskami edycji w kolumnach
+        # Nagłówki "tabeli"
+        h1, h2, h3, h4 = st.columns([3, 2, 2, 4])
+        h1.write("**Produkt**")
+        h2.write("**Aktualny stan**")
+        h3.write("**Cena jedn.**")
+        h4.write("**Zmień o ilość**")
+        st.divider()
+
+        # Wyświetlanie produktów
         for _, row in df_display.iterrows():
             with st.container():
-                c1, c2, c3, c4 = st.columns([3, 2, 2, 3])
+                c1, c2, c3, c4 = st.columns([3, 2, 2, 4])
+                
                 c1.write(f"**{row['Nazwa']}**")
                 
                 # Kolorowanie stanu
                 stock_color = ":red[" if row['Liczba'] < 10 else ":green["
-                c2.write(f"Stan: {stock_color}{row['Liczba']} szt.]")
+                c2.write(f"{stock_color}{row['Liczba']} szt.]")
                 
-                c3.write(f"Cena: {row['Cena']:.2f} zł")
+                c3.write(f"{row['Cena']:.2f} zł")
                 
-                # Przyciski szybkiej zmiany
-                btn_col1, btn_col2 = c4.columns(2)
-                if btn_col1.button("➕", key=f"add_{row['id']}"):
-                    update_stock(row['id'], row['Liczba'], 1)
-                if btn_col2.button("➖", key=f"sub_{row['id']}"):
-                    update_stock(row['id'], row['Liczba'], -1)
-                st.divider()
+                # Kontrola ilości do dodania/odjęcia
+                btn_col_input, btn_col_plus, btn_col_minus = c4.columns([2, 1, 1])
+                
+                amount = btn_col_input.number_input(
+                    "Ilość", 
+                    min_value=1, 
+                    value=1, 
+                    step=1, 
+                    key=f"amt_{row['id']}", 
+                    label_visibility="collapsed"
+                )
+                
+                if btn_col_plus.button("➕", key=f"add_{row['id']}", use_container_width=True):
+                    update_stock(row['id'], row['Liczba'], amount)
+                
+                if btn_col_minus.button("➖", key=f"sub_{row['id']}", use_container_width=True):
+                    update_stock(row['id'], row['Liczba'], -amount)
+                
+                st.write("") # Odstęp
 
     # --- TAB 3: DODAWANIE I USUWANIE ---
     with tab3:
         col_add, col_del = st.columns(2)
         
         with col_add:
-            st.subheader("Dodaj nowy produkt")
+            st.subheader("Nowy produkt")
             if categories:
                 cat_mapping = {cat['Nazwa']: cat['id'] for cat in categories}
                 with st.form("add_form", clear_on_submit=True):
                     nazwa = st.text_input("Nazwa produktu")
                     c1, c2 = st.columns(2)
-                    liczba = c1.number_input("Ilość", min_value=0, step=1)
+                    liczba = c1.number_input("Początkowa ilość", min_value=0, step=1)
                     cena = c2.number_input("Cena (zł)", min_value=0.0, format="%.2f")
                     kat = st.selectbox("Kategoria", options=list(cat_mapping.keys()))
                     
@@ -128,7 +152,7 @@ if products:
 
         with col_del:
             st.subheader("Usuń produkt")
-            prod_to_del = st.selectbox("Wybierz do usunięcia", options=df['Nazwa'].tolist())
+            prod_to_del = st.selectbox("Wybierz do usunięcia", options=df['Nazwa'].tolist(), key="delete_select")
             if st.button("Usuń trwale", type="primary"):
                 target_id = df[df['Nazwa'] == prod_to_del]['id'].values[0]
                 supabase.table("Produkty").delete().eq("id", target_id).execute()
@@ -138,11 +162,9 @@ if products:
     # --- TAB 4: RAPORTY ---
     with tab4:
         st.header("Eksport danych")
-        st.write("Pobierz aktualny stan magazynowy w formacie CSV, który otworzysz w Excelu.")
-        
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Pobierz raport CSV",
+            label="📥 Pobierz raport CSV (Excel)",
             data=csv,
             file_name='stan_magazynu.csv',
             mime='text/csv',
