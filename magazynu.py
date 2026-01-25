@@ -3,7 +3,7 @@ import pandas as pd
 from supabase import create_client, Client
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v6", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Magazyn Pro v7", layout="wide", page_icon="📦")
 
 # --- POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
@@ -26,7 +26,6 @@ def get_categories():
 
 @st.cache_data(ttl=600)
 def get_products():
-    # Pobieramy dane z złączeniem (jeśli Supabase pozwala) lub czyste dane
     res = supabase.table("Produkty").select("*").execute()
     return res.data
 
@@ -46,113 +45,92 @@ categories = get_categories()
 df = pd.DataFrame(products) if products else pd.DataFrame()
 cat_df = pd.DataFrame(categories) if categories else pd.DataFrame()
 
+# --- LOGIKA POWIADOMIEŃ DLA TOMASZA ---
+low_stock_threshold = 10
+notifications = []
+if not df.empty:
+    low_stock_df = df[df['Liczba'] < low_stock_threshold]
+    for _, row in low_stock_df.iterrows():
+        notifications.append({
+            "Odbiorca": "Zaopatrzeniowiec Tomasz",
+            "Produkt": row['Nazwa'],
+            "Stan": row['Liczba'],
+            "Priorytet": "Wysoki" if row['Liczba'] <= 3 else "Normalny"
+        })
+
 # --- INTERFEJS ---
 st.title("🚀 System Zarządzania Magazynem")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📦 Magazyn", "🔧 Administracja", "📄 Raporty"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Dashboard", 
+    "📦 Magazyn", 
+    "📥 Wiadomości", 
+    "🔧 Administracja", 
+    "📄 Raporty"
+])
 
 if not df.empty:
     # --- TAB 1: DASHBOARD ---
     with tab1:
-        low_stock_limit = 10
-        low_stock_items = df[df['Liczba'] < low_stock_limit]
-        
-        if not low_stock_items.empty:
-            st.error(f"🚨 ALERM: {len(low_stock_items)} produktów wymaga zamówienia!")
-        
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         total_val = (df['Liczba'] * df['Cena']).sum()
         col1.metric("Wartość towaru", f"{total_val:,.2f} zł")
         col2.metric("Suma sztuk", f"{int(df['Liczba'].sum())}")
-        col3.metric("Liczba SKU", len(df))
-        col4.metric("Kategorie", len(cat_df))
+        col3.metric("Alerty", len(notifications))
 
         st.divider()
-        c_left, c_right = st.columns(2)
-        
-        with c_left:
-            st.subheader("Stan ilościowy")
-            st.bar_chart(df.set_index('Nazwa')['Liczba'])
-        
-        with c_right:
-            st.subheader("Wartość wg kategorii")
-            if not cat_df.empty:
-                m_df = df.merge(cat_df.rename(columns={'id': 'Kategoria_id', 'Nazwa': 'Kat_Nazwa'}), on='Kategoria_id')
-                m_df['Suma'] = m_df['Liczba'] * m_df['Cena']
-                cat_chart = m_df.groupby('Kat_Nazwa')['Suma'].sum()
-                st.bar_chart(cat_chart)
+        st.subheader("Analiza struktury")
+        st.bar_chart(df.set_index('Nazwa')['Liczba'])
 
     # --- TAB 2: MAGAZYN & KONTROLA ---
     with tab2:
-        st.header("Kontrola towaru")
-        
-        f_col1, f_col2 = st.columns([1, 2])
-        with f_col1:
-            cat_filter = ["Wszystkie"] + cat_df['Nazwa'].tolist() if not cat_df.empty else ["Wszystkie"]
-            sel_cat = st.selectbox("Filtruj kategorię", cat_filter)
-        with f_col2:
-            search = st.text_input("Szukaj nazwy...", placeholder="Wpisz min. 3 znaki")
-
-        # Filtrowanie
-        display_df = df.copy()
-        if sel_cat != "Wszystkie":
-            target_id = cat_df[cat_df['Nazwa'] == sel_cat]['id'].values[0]
-            display_df = display_df[display_df['Kategoria_id'] == target_id]
-        if search:
-            display_df = display_df[display_df['Nazwa'].str.contains(search, case=False)]
+        search = st.text_input("Szukaj produktu...", placeholder="Wpisz nazwę...")
+        display_df = df[df['Nazwa'].str.contains(search, case=False)] if search else df
 
         for _, row in display_df.iterrows():
-            with st.expander(f"📦 {row['Nazwa']} (Obecnie: {row['Liczba']} szt.)", expanded=True):
+            with st.expander(f"📦 {row['Nazwa']} (Stan: {row['Liczba']})"):
                 c1, c2, c3 = st.columns([3, 2, 2])
-                c1.write(f"**Cena jedn:** {row['Cena']:.2f} zł | **Wartość:** {row['Cena']*row['Liczba']:.2f} zł")
-                
-                # Szybka zmiana stanu
+                c1.write(f"**Cena:** {row['Cena']:.2f} zł")
                 amt = c2.number_input("Ilość", min_value=1, value=1, key=f"amt_{row['id']}")
-                btn_col1, btn_col2 = c3.columns(2)
-                if btn_col1.button("➕", key=f"add_{row['id']}", use_container_width=True):
-                    update_stock(row['id'], row['Liczba'], amt)
-                if btn_col2.button("➖", key=f"sub_{row['id']}", use_container_width=True):
-                    update_stock(row['id'], row['Liczba'], -amt)
+                if c3.button("Dodaj", key=f"add_{row['id']}"): update_stock(row['id'], row['Liczba'], amt)
+                if c3.button("Odejmij", key=f"sub_{row['id']}"): update_stock(row['id'], row['Liczba'], -amt)
 
-    # --- TAB 3: ADMINISTRACJA ---
+    # --- TAB 3: SKRZYNKA WIADOMOŚCI (NOWOŚĆ) ---
+    with tab5: # Przesunięte dla Tomasza
+        pass 
+
     with tab3:
-        st.subheader("Zarządzanie bazą danych")
-        
-        col_add, col_del = st.columns(2)
-        with col_add:
-            st.info("Dodaj nowy produkt")
-            with st.form("add_form", clear_on_submit=True):
-                new_n = st.text_input("Nazwa produktu")
-                new_l = st.number_input("Stan początkowy", min_value=0)
-                new_c = st.number_input("Cena netto", min_value=0.0)
-                new_k = st.selectbox("Kategoria", cat_df['Nazwa'].tolist() if not cat_df.empty else [])
-                
-                if st.form_submit_button("Zapisz w bazie"):
-                    k_id = cat_df[cat_df['Nazwa'] == new_k]['id'].values[0]
-                    supabase.table("Produkty").insert({
-                        "Nazwa": new_n, "Liczba": new_l, "Cena": new_c, "Kategoria_id": k_id
-                    }).execute()
-                    st.cache_data.clear()
-                    st.rerun()
+        st.header("📥 Skrzynka odbiorcza: Zaopatrzeniowiec Tomasz")
+        if not notifications:
+            st.success("Wszystkie stany magazynowe w normie. Brak nowych wiadomości.")
+        else:
+            st.info(f"Masz {len(notifications)} nowych powiadomień o niskim stanie zapasów.")
+            for msg in notifications:
+                with st.chat_message("user"):
+                    st.write(f"**DO:** {msg['Odbiorca']}")
+                    st.write(f"**TREŚĆ:** Produkt **{msg['Produkt']}** jest na wyczerpaniu. Obecny stan: **{msg['Stan']} szt.**")
+                    st.caption(f"Priorytet: {msg['Priorytet']}")
+                    if st.button(f"Potwierdź odbiór dla {msg['Produkt']}", key=f"msg_{msg['Produkt']}"):
+                        st.toast(f"Powiadomienie dla {msg['Produkt']} zostało zarchiwizowane.")
 
-        with col_del:
-            st.warning("Usuwanie produktów")
-            del_prod = st.selectbox("Wybierz produkt do usunięcia", df['Nazwa'].tolist())
-            if st.button("Usuń bezpowrotnie", type="primary"):
-                target_id = df[df['Nazwa'] == del_prod]['id'].values[0]
-                supabase.table("Produkty").delete().eq("id", target_id).execute()
+    # --- TAB 4: ADMINISTRACJA ---
+    with tab4:
+        st.subheader("Zarządzanie produktami")
+        with st.form("add_form"):
+            n = st.text_input("Nazwa")
+            l = st.number_input("Ilość", min_value=0)
+            c = st.number_input("Cena", min_value=0.0)
+            k = st.selectbox("Kategoria", cat_df['Nazwa'].tolist() if not cat_df.empty else [])
+            if st.form_submit_button("Dodaj produkt"):
+                k_id = cat_df[cat_df['Nazwa'] == k]['id'].values[0]
+                supabase.table("Produkty").insert({"Nazwa": n, "Liczba": l, "Cena": c, "Kategoria_id": k_id}).execute()
                 st.cache_data.clear()
                 st.rerun()
-        
-        st.divider()
-        st.caption(f"Wykorzystanie limitu darmowej bazy (Supabase): {len(df)} wierszy.")
 
-    # --- TAB 4: RAPORTY ---
-    with tab4:
-        st.subheader("Eksport danych")
+    # --- TAB 5: RAPORTY ---
+    with tab5:
         st.dataframe(df, use_container_width=True)
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("Pobierz plik CSV", csv, "magazyn_eksport.csv", "text/csv")
+        st.download_button("Eksportuj do CSV", df.to_csv(index=False).encode('utf-8'), "raport.csv")
 
 else:
-    st.warning("Magazyn jest pusty. Przejdź do zakładki Administracja, aby dodać pierwsze produkty.")
+    st.info("Brak produktów w bazie.")
