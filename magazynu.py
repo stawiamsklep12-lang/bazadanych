@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from supabase import create_client, Client
-from postgrest.exceptions import APIError
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v5", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="Magazyn Pro v6", layout="wide", page_icon="🏢")
 
 # --- POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
@@ -14,128 +14,112 @@ def init_connection():
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.error(f"Błąd konfiguracji połączenia: {e}")
+        st.error(f"Błąd konfiguracji: {e}")
         st.stop()
 
 supabase = init_connection()
 
-# --- FUNKCJE POBIERANIA DANYCH ---
-@st.cache_data(ttl=600)
-def get_categories():
-    res = supabase.table("Kategorie").select("id, Nazwa").execute()
-    return res.data
+# --- FUNKCJE DANYCH ---
+@st.cache_data(ttl=60)
+def get_data(table_name):
+    return supabase.table(table_name).select("*").execute().data
 
-@st.cache_data(ttl=600)
-def get_products():
-    res = supabase.table("Produkty").select("id, Nazwa, Liczba, Cena, Kategoria_id").execute()
-    return res.data
+def log_sale(product_id, product_name, quantity, total_price):
+    """Rejestruje sprzedaż i aktualizuje magazyn."""
+    # 1. Dodaj do tabeli Sprzedaz
+    supabase.table("Sprzedaz").insert({
+        "produkt_id": product_id,
+        "nazwa_produktu": product_name,
+        "ilosc": quantity,
+        "cena_calkowita": total_price
+    }).execute()
+    
+    # 2. Pobierz aktualny stan
+    res = supabase.table("Produkty").select("Liczba").eq("id", product_id).execute()
+    current_stock = res.data[0]['Liczba']
+    
+    # 3. Aktualizuj stan
+    supabase.table("Produkty").update({"Liczba": current_stock - quantity}).eq("id", product_id).execute()
+    st.cache_data.clear()
 
-# --- FUNKCJE OPERACYJNE ---
-def update_stock(product_id, current_stock, change):
-    new_stock = max(0, current_stock + change)
-    try:
-        supabase.table("Produkty").update({"Liczba": new_stock}).eq("id", product_id).execute()
-        st.cache_data.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Błąd podczas aktualizacji: {e}")
+# --- UI ---
+st.title("🏢 Magazyn & Sprzedaż Enterprise")
 
-# --- GŁÓWNA LOGIKA ---
-st.title("🚀 Inteligentny Magazyn Pro")
-
-# Pobranie danych
-products = get_products()
-categories = get_categories()
-
-# Zakładki
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📦 Magazyn & Kontrola", "🔧 Administracja", "📄 Raporty"])
+products = get_data("Produkty")
+categories = get_data("Kategorie")
+sales = get_data("Sprzedaz")
 
 if products:
-    df = pd.DataFrame(products)
-    
-    # --- TAB 1: DASHBOARD ---
+    df_prod = pd.DataFrame(products)
+    df_sales = pd.DataFrame(sales) if sales else pd.DataFrame()
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Dashboard", "🛒 Sprzedaż (Kasa)", "📦 Magazyn", "📜 Historia", "⚙️ Admin"
+    ])
+
+    # --- TAB 1: DASHBOARD (Analityka) ---
     with tab1:
-        # Alerty o niskim stanie na samej górze
-        low_stock_items = df[df['Liczba'] < 10]
-        if not low_stock_items.empty:
-            st.warning(f"⚠️ Uwaga! Masz {len(low_stock_items)} produkty z niskim stanem zapasów!")
-            with st.expander("Zobacz listę braków"):
-                st.write(", ".join(low_stock_items['Nazwa'].tolist()))
-
-        total_value = (df['Liczba'] * df['Cena']).sum()
-        total_items = df['Liczba'].sum()
+        col1, col2, col3 = st.columns(3)
+        total_val = (df_prod['Liczba'] * df_prod['Cena']).sum()
         
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Wycena magazynu", f"{total_value:,.2f} zł", help="Suma (Cena * Liczba)")
-        col_b.metric("Suma jednostek", f"{int(total_items)} szt.")
-        col_c.metric("Asortyment", len(df), help="Liczba unikalnych produktów")
+        col1.metric("Wartość towaru", f"{total_val:,.2f} zł")
+        if not df_sales.empty:
+            total_revenue = df_sales['cena_calkowita'].sum()
+            col2.metric("Przychód całkowity", f"{total_revenue:,.2f} zł", delta=f"{len(df_sales)} transakcji")
         
-        st.divider()
-        st.subheader("Struktura zapasów")
-        st.bar_chart(df.set_index('Nazwa')['Liczba'])
+        st.subheader("Popularność produktów (sprzedaż)")
+        if not df_sales.empty:
+            sales_chart = df_sales.groupby('nazwa_produktu')['ilosc'].sum().sort_values(ascending=False)
+            st.bar_chart(sales_chart)
 
-    # --- TAB 2: MAGZYN & KONTROLA (UX UPGRADE) ---
+    # --- TAB 2: SPRZEDAŻ (Nowość) ---
     with tab2:
-        st.header("Zarządzanie zapasami")
-        search = st.text_input("🔍 Wyszukaj produkt lub kategorię...", placeholder="Zacznij pisać...")
+        st.header("🛒 Panel Kasjera")
+        col_s1, col_s2 = st.columns([2, 1])
         
-        df_filtered = df[df['Nazwa'].str.contains(search, case=False)] if search else df
-
-        # Wyświetlanie jako karty/wiersze z paskami postępu
-        for _, row in df_filtered.iterrows():
-            with st.status(f"📦 {row['Nazwa']} | Stan: {row['Liczba']} szt.", expanded=True):
-                c1, c2, c3 = st.columns([2, 2, 2])
-                
-                with c1:
-                    st.write(f"**Cena:** {row['Cena']:.2f} zł")
-                    st.write(f"**Wartość pozycji:** {row['Cena']*row['Liczba']:.2f} zł")
-                
-                with c2:
-                    # Pasek postępu (przyjmujemy 100 jako 'pełny magazyn' dla wizualizacji)
-                    progress = min(row['Liczba'] / 100, 1.0)
-                    st.write("Poziom zapasów:")
-                    st.progress(progress)
-                
-                with c3:
-                    st.write("Szybka korekta:")
-                    cc1, cc2, cc3 = st.columns([2, 1, 1])
-                    amt = cc1.number_input("Ilość", min_value=1, value=1, key=f"n_{row['id']}", label_visibility="collapsed")
-                    if cc2.button("➕", key=f"p_{row['id']}", use_container_width=True):
-                        update_stock(row['id'], row['Liczba'], amt)
-                    if cc3.button("➖", key=f"m_{row['id']}", use_container_width=True):
-                        update_stock(row['id'], row['Liczba'], -amt)
-
-    # --- TAB 3: ADMINISTRACJA ---
-    with tab3:
-        col_add, col_del = st.columns(2)
-        with col_add:
-            st.subheader("✨ Nowy produkt")
-            if categories:
-                cat_map = {c['Nazwa']: c['id'] for c in categories}
-                with st.form("new_prod"):
-                    n = st.text_input("Nazwa")
-                    l = st.number_input("Ilość", min_value=0)
-                    c = st.number_input("Cena", min_value=0.0)
-                    k = st.selectbox("Kategoria", list(cat_map.keys()))
-                    if st.form_submit_button("Dodaj produkt"):
-                        supabase.table("Produkty").insert({"Nazwa":n, "Liczba":l, "Cena":c, "Kategoria_id":cat_map[k]}).execute()
-                        st.cache_data.clear()
-                        st.rerun()
-        
-        with col_del:
-            st.subheader("🗑️ Usuwanie")
-            to_del = st.selectbox("Produkt", df['Nazwa'].tolist())
-            if st.button("Usuń trwale", type="primary"):
-                tid = df[df['Nazwa'] == to_del]['id'].values[0]
-                supabase.table("Produkty").delete().eq("id", tid).execute()
-                st.cache_data.clear()
+        with col_s1:
+            selected_p_name = st.selectbox("Wybierz produkt do sprzedaży", df_prod['Nazwa'].tolist())
+            product_row = df_prod[df_prod['Nazwa'] == selected_p_name].iloc[0]
+            
+            max_qty = int(product_row['Liczba'])
+            st.info(f"Dostępność: {max_qty} szt. | Cena jedn.: {product_row['Cena']:.2f} zł")
+            
+            sale_qty = st.number_input("Ilość", min_value=1, max_value=max_qty if max_qty > 0 else 1, step=1)
+            total_p = sale_qty * product_row['Cena']
+            
+        with col_s2:
+            st.write("### Podsumowanie")
+            st.write(f"Do zapłaty: **{total_p:.2f} zł**")
+            if max_qty <= 0:
+                st.error("Brak towaru na stanie!")
+            elif st.button("Potwierdź Sprzedaż", type="primary", use_container_width=True):
+                log_sale(product_row['id'], selected_p_name, sale_qty, total_p)
+                st.success("Sprzedano!")
                 st.rerun()
 
-    # --- TAB 4: RAPORTY ---
-    with tab4:
-        st.header("Archiwizacja i dane")
-        st.dataframe(df, use_container_width=True)
-        st.download_button("Pobierz Arkusz Excel (CSV)", df.to_csv().encode('utf-8'), "magazyn.csv", "text/csv")
+    # --- TAB 3: MAGAZYN ---
+    with tab3:
+        st.header("📦 Zarządzanie stanami")
+        st.dataframe(df_prod[['Nazwa', 'Liczba', 'Cena']], use_container_width=True)
+        # Tu można zostawić Twoją poprzednią logikę kart z pętlą for
 
-else:
-    st.info("Brak towaru. Dodaj coś w administracji!")
+    # --- TAB 4: HISTORIA (Archiwizacja) ---
+    with tab4:
+        st.header("📜 Historia Operacji")
+        if not df_sales.empty:
+            df_sales['created_at'] = pd.to_datetime(df_sales['created_at'])
+            st.dataframe(df_sales.sort_values('created_at', ascending=False), use_container_width=True)
+            
+            # Eksport do CSV
+            csv = df_sales.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Pobierz raport sprzedaży (CSV)", csv, "raport_sprzedazy.csv", "text/csv")
+        else:
+            st.info("Brak zarejestrowanych sprzedaży.")
+
+    # --- TAB 5: ADMIN ---
+    with tab5:
+        # Przenieś tutaj formularze dodawania i usuwania produktów
+        st.subheader("Zarządzanie bazą danych")
+        if st.button("Wyczyść pamięć podręczną (Cache)"):
+            st.cache_data.clear()
+            st.rerun()
